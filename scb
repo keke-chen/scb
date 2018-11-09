@@ -1,0 +1,267 @@
+#! /usr/bin/env python
+"""
+scb: simple c++ building tool
+
+print usage: scb help
+
+by Keke Chen
+"""
+
+
+import os
+import sys
+import pytoml
+import getpass
+
+MAKE_TEMPLATE = '''
+CC        := g++
+LD        := g++
+
+MODULES   := $$MODS$$
+SRC_DIR   := $(addprefix src/,$(MODULES))
+BUILD_DIR := $(addprefix build/,$(MODULES))
+CFLAGS    := $$CFLAGS$$
+SRC       := $(foreach sdir,$(SRC_DIR),$(wildcard $(sdir)/*.cpp))
+OBJ       := $(patsubst src/%.cpp,build/%.o,$(SRC))
+INCLUDES  := $(addprefix -I,$(SRC_DIR)) $$INCS$$
+LIBS      := $$LIBS$$
+MAINS     := $$MAINS$$
+EOBJ      := $(filter-out $(MAINS),$(OBJ))
+
+vpath %.cpp $(SRC_DIR)
+
+.PHONY: all checkdirs clean
+
+all: checkdirs $$TARGETS$$
+
+$$BLDTGTS$$
+
+checkdirs: $(BUILD_DIR)
+
+$(BUILD_DIR):
+\t@mkdir -p $@
+
+clean:
+\t@rm -rf $(BUILD_DIR)
+'''
+
+
+def newprj(newpath):
+    """create directory and generate the basic config file"""
+    if not os.path.exists(newpath):
+        os.makedirs(newpath)
+    src = newpath + os.sep + "src"
+    if not os.path.exists(src):
+        os.makedirs(src)
+    out = newpath + os.sep + "out"
+    if not os.path.exists(out):
+        os.makedirs(out)
+    cache = newpath + os.sep + ".cache"
+    if not os.path.exists(cache):
+        os.makedirs(cache)
+    build = newpath + os.sep + "build"
+    if not os.path.exists(build):
+        os.makedirs(build)
+
+    config = newpath + os.sep + "config.toml"
+    config_file = open(config, 'w+')
+    prjn = newpath.replace(os.sep, ' ').strip().split(' ')[-1]
+    config_file.write("""
+project="%s"
+author="%s"
+version="0.01"
+
+libs=[]
+
+includes=[]
+
+cflags=["-O2", "-std=c++11", "-Wall"]
+
+[programs]"""% (prjn, getpass.getuser()))
+    config_file.close()
+
+def find_main_objs():
+    """ find the the .cpp source files that will be compiled to .o files"""
+    mainfs = []
+    for dirname, dummy, filenames in os.walk('src'):
+        for file_name in filenames:
+            if file_name.find(".cpp") and \
+                open(dirname + os.sep + file_name).read().find(" main(") != -1:
+                mainfs.append(("build" + os.sep + dirname + os.sep + \
+                            file_name.replace(".cpp", ".o")).replace("src" + os.sep, ""))
+    return mainfs
+
+def build_target(tgt, tgtobj, tgtsrc):
+    """generate commands for building the .o files"""
+    txt = "\n%s:  %s\n\t$(CC) -c $(INCLUDES) $(CFLAGS) $< -o $@"%(tgtobj, tgtsrc)
+    txt += "\n%s: $(EOBJ) %s\n\t$(LD) $^ $(LIBS) -o $@"%("build" + os.sep + tgt, tgtobj)
+    return txt
+
+def build_obj(mod):
+    ''' generate commands for building .o files'''
+    return "\nbuild/%s/%%.o: src/%s/%%.cpp src/%s/%%.h"%(mod, mod, mod) +   \
+            "\n\t$(CC) -c $(INCLUDES) $(CFLAGS) $< -o $@"
+
+def get_sources():
+    ''' find .cpp source files'''
+    mods = []
+    for dirname, dirnames, dummy in os.walk('src'):
+        if dirname == 'src':
+            dirname = ""
+        else:
+            dirname = dirname.replace("src" + os.sep, "") + os.sep
+        mods.extend([dirname + d for d in dirnames])
+    return mods
+
+def dir_changed():
+    ''' detect whether the directory has contents changed'''
+    current = set(get_sources())
+    old = set([v.strip() for v in open(".cache" + os.sep + "srclist").readlines()])
+    return current != old
+
+def config_changed():
+    ''' detect whether the configuration file is changed'''
+    try:
+        mtime = int(os.path.getmtime("config.toml"))
+    except OSError:
+        mtime = 0
+    ctf = ".cache" + os.sep + "configtime"
+    changed = True
+    if os.path.exists(ctf):
+        cftime_file = open(ctf)
+        oldtime = int(cftime_file.readline().strip())
+        cftime_file.close()
+        if oldtime == mtime:
+            changed = False
+    if changed:
+        cftime_file = open(ctf, 'w+')
+        cftime_file.write(str(mtime))
+        cftime_file.close()
+        return True
+    else:
+        return False
+
+def build():
+    ''' build the project'''
+    if not os.path.exists("config.toml") or not os.path.exists("src"):
+        print >>sys.stderr, "couldn't find config.toml or src directory."
+        print >>sys.stderr, "Please run 'scb build' in the project directory"
+        return
+    config = pytoml.load(open("config.toml"))
+    os.system("mkdir .cache 2> /dev/null")
+    makefile = ".cache" + os.sep + "Makefile"
+
+    if not os.path.exists(makefile) or dir_changed() or config_changed():
+        #f = open(os.path.expanduser("~")+os.sep+".scb"+os.sep+"makefile.tmp")
+        #txt = f.read()
+        #f.close()
+        txt = MAKE_TEMPLATE
+        if config["libs"] != []:
+            strs = " ".join(["-l" + lib for lib in config["libs"]])
+            txt = txt.replace("$$LIBS$$", strs)
+        else:
+            txt = txt.replace("$$LIBS$$", "")
+        if config["cflags"] != []:
+            strs = " ".join(config["cflags"])
+            txt = txt.replace("$$CFLAGS$$", strs)
+        else:
+            txt = txt.replace("$$CFLAGS$$", "")
+        if config["includes"] != []:
+            strs = " ".join(["-I" + inc for inc in config["includes"]])
+            txt = txt.replace("$$INCS$$", strs)
+        else:
+            txt = txt.replace("$$INCS$$", "")
+
+        builds = ""
+        mods = get_sources()
+        for mod in mods:
+            builds += build_obj(mod)
+
+        txt = txt.replace("$$MODS$$", " ".join(mods))
+        targets = config["programs"]
+        if len(targets) == 0:
+            print >> sys.stderr, "You have not specified any main function in config.toml"
+            return
+
+        tgts = []
+        for tgt in targets:
+            tgts.append("build" + os.sep + tgt)
+            obj = "build" + os.sep + targets[tgt].replace(".cpp", ".o")
+            builds += build_target(tgt, obj, 'src' + os.sep + targets[tgt])
+        txt = txt.replace("$$MAINS$$", " ".join(find_main_objs()))
+        txt = txt.replace("$$TARGETS$$", " ".join(tgts))
+        txt = txt.replace("$$BLDTGTS$$", builds)
+
+        temp_file = open(makefile, 'w+')
+        temp_file.write(txt)
+        temp_file.close()
+        temp_file = open(".cache" + os.sep + "srclist", 'w+')
+        temp_file.write("\n".join(mods))
+        temp_file.close()
+        os.system("rm -rf build/* 2> /dev/null")
+
+    os.system("make -f .cache/Makefile")
+
+def rebuild():
+    ''' rebuild the project '''
+    os.system("rm -rf build/* 2> /dev/null")
+    os.system("make -f .cache/Makefile")
+
+def clean():
+    ''' clean .cache and build directory '''
+    os.system("rm -rf .cache/* 2> /dev/null")
+    os.system("rm -rf build/* 2> /dev/null")
+
+def install():
+    ''' install scb to ~/.local/bin '''
+    os.system("mkdir -p ~/.local/bin 2> /dev/null")
+    os.system("cp scb ~/.local/bin")
+    os.environ["PATH"] += os.pathsep + "~/.local/bin"
+    bashrc = open(os.path.expanduser('~') + "/.bashrc", "a+")
+    exportpath = "export PATH=$PATH:~/.local/bin"
+    print >>bashrc, exportpath
+    os.chmod(os.path.expanduser('~') + "/.local/bin/scb", 0755)
+    os.system(exportpath)
+
+def usage():
+    ''' print the usage of scb'''
+    print """
+scb help
+    print this usage
+
+scb install
+    install scb to ~/.local/bin and change PATH
+
+scb new project_name
+    create project directory
+
+scb build or scb
+    build project. Need to run the command in the project directory
+
+scb rebuild
+    remove the files in build/, and regenerate them all
+
+scb clean
+    clear the building files. Need to run it in the project directory
+
+"""
+
+def main():
+    ''' main function '''
+    num_args = len(sys.argv)
+
+    if num_args >= 3 and sys.argv[1] == "new":
+        newprj(sys.argv[2])
+    elif num_args == 1 or (num_args >= 2 and sys.argv[1] == "build"):
+        build()
+    elif num_args >= 2 and sys.argv[1] == "clean":
+        clean()
+    elif num_args == 2 and sys.argv[1] == "install":
+        install()
+    elif num_args == 2 and sys.argv[1] == "rebuild":
+        rebuild()
+    else:
+        usage()
+
+if __name__ == '__main__':
+    main()
